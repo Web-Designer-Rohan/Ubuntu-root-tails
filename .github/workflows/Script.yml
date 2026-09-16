@@ -1,0 +1,101 @@
+name: Ubuntu Root VPS (Tailscale)
+on: workflow_dispatch
+
+jobs:
+  vps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Optimize VM, Configure Root SSH & Connect Tailscale
+        env:
+          TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          set -e
+
+          # =========================================================================
+          # 1. ADVANCED VM & KERNEL OPTIMIZATIONS
+          # =========================================================================
+          echo "=== Starting Pre-Boot System Optimization ==="
+          
+          # Stop heavy, non-essential GitHub runner background services
+          sudo systemctl stop docker.service || true
+          sudo systemctl stop containerd.service || true
+          sudo systemctl stop dotnet-diagnostics-monitor.service || true
+          sudo systemctl stop snapd.service || true
+          sudo systemctl stop snapd.socket || true
+
+          # Set CPU Governor to Performance on all cores
+          for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+            [ -f "$cpu" ] && echo "performance" | sudo tee "$cpu" > /dev/null || true
+          done
+
+          # Tune kernel parameters for high throughput & low network latency
+          sudo sysctl -w vm.swappiness=10
+          sudo sysctl -w vm.dirty_ratio=15
+          sudo sysctl -w vm.dirty_background_ratio=5
+          sudo sysctl -w fs.file-max=2097152
+          sudo sysctl -w net.core.somaxconn=4096
+
+          # Flush and clean cache/buffers
+          sync
+          sudo sysctl -w vm.drop_caches=3
+
+          echo "=== Memory Status After Optimization ==="
+          free -h
+
+          # =========================================================================
+          # 2. OPENSSH SERVER INSTALLATION & ROOT ACCESS CONFIGURATION
+          # =========================================================================
+          echo "=== Configuring OpenSSH for Root Access ==="
+          sudo apt-get update -qq && sudo apt-get install -y -qq openssh-server curl wget
+
+          # Set root password to 'root'
+          echo "root:root" | sudo chpasswd
+
+          # Configure SSH to allow root login and password authentication
+          sudo sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#*ChallengeResponseAuthentication.*/ChallengeResponseAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#*ClientAliveInterval.*/ClientAliveInterval 30/' /etc/ssh/sshd_config
+          sudo sed -i 's/^#*ClientAliveCountMax.*/ClientAliveCountMax 10/' /etc/ssh/sshd_config
+
+          # Restart OpenSSH
+          sudo systemctl restart ssh
+          echo "OpenSSH service successfully configured."
+
+          # =========================================================================
+          # 3. TAILSCALE INSTALLATION & CONNECTION
+          # =========================================================================
+          echo "=== Installing & Starting Tailscale ==="
+          curl -fsSL https://tailscale.com/install.sh | sudo sh
+
+          if [ -z "$TAILSCALE_AUTHKEY" ]; then
+            echo "::error::Secret TAILSCALE_AUTHKEY is missing! Add it in Repository Settings -> Secrets and variables -> Actions."
+            exit 1
+          fi
+
+          # Connect Tailscale with custom hostname and accept SSH traffic
+          sudo tailscale up --authkey="${TAILSCALE_AUTHKEY}" --hostname="gh-vps-$(openssl rand -hex 3)" --ssh=false --accept-routes
+
+          # Retrieve Tailscale IP address (IPv4)
+          TS_IP=$(tailscale ip -4)
+
+          # =========================================================================
+          # 4. CONNECTION BLUEPRINT
+          # =========================================================================
+          echo "================================================================="
+          echo "                 VPS READY FOR CONNECTION                        "
+          echo "================================================================="
+          echo "Tailscale IP   : $TS_IP"
+          echo "Username       : root"
+          echo "Password       : root"
+          echo ""
+          echo "Connect directly via your terminal (Make sure Tailscale is active on your device):"
+          echo "  ssh root@$TS_IP"
+          echo "================================================================="
+
+          # =========================================================================
+          # 5. KEEP ALIVE (6 Hours Max Runtime)
+          # =========================================================================
+          echo "Session active. Sleeping for up to 6 hours..."
+          sleep 21600
